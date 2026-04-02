@@ -166,6 +166,9 @@ textarea.form-input{resize:vertical;min-height:60px}
 .spinner{width:36px;height:36px;border:3px solid var(--border);border-top-color:var(--c2);border-radius:50%;animation:spin .7s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 
+.error-box{background:#fff1f2;border:1px solid #fecaca;color:#991b1b;padding:12px 14px;border-radius:8px;margin:16px 24px;font-size:13px;white-space:pre-wrap}
+.debug-box{background:#eff6ff;border:1px solid #bfdbfe;color:#1e3a8a;padding:10px 12px;border-radius:8px;margin:16px 24px;font-size:12px;white-space:pre-wrap}
+
 @media(max-width:900px){
   .sidebar{width:56px}.sidebar-logo p,.sidebar-logo h2,.nav-section,.nav-item span,.user-bar-email,.user-bar-role{display:none}
   .nav-item{justify-content:center;margin:2px 4px}
@@ -177,13 +180,11 @@ textarea.form-input{resize:vertical;min-height:60px}
 </head>
 <body>
 
-<!-- Loading -->
 <div id="loading-overlay">
   <div class="spinner"></div>
   <div style="font-size:13px;color:var(--gray)">Loading CredentialPro…</div>
 </div>
 
-<!-- Auth Screen -->
 <div id="auth-screen" style="display:none">
   <div class="auth-card">
     <div class="auth-logo">CredentialPro</div>
@@ -262,12 +263,8 @@ textarea.form-input{resize:vertical;min-height:60px}
 <div id="modal-root"></div>
 
 <script>
-// ════════════════════════════════════════════════════
-// CONFIG — replace with your Supabase project values
-// ════════════════════════════════════════════════════
 const SUPABASE_URL  = 'https://ksheufsoteoswhlbxkif.supabase.co';
 const SUPABASE_ANON = 'sb_publishable_TNF1YBGy1R_z6IrtdGhPzw_wMnF6vRQ';
-// ════════════════════════════════════════════════════
 
 const { createClient } = supabase;
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON);
@@ -286,44 +283,67 @@ let state = {
   settings:{},
   currentUser:null,
   currentRole:null,
+  loadError:null,
+  realtimeSubscribed:false,
 };
 
-// ── Auth ─────────────────────────────────────────────────────
+function safeText(v){ return v == null ? '' : String(v); }
+
 async function initAuth(){
-  const {data:{session}} = await sb.auth.getSession();
-  if(session){
-    await loadUserRole(session.user);
-  } else {
-    showAuthScreen();
-  }
-  sb.auth.onAuthStateChange(async (event, session) => {
-    if(event === 'SIGNED_IN' && session){
+  try {
+    const {data:{session}, error} = await sb.auth.getSession();
+    if (error) throw error;
+
+    if(session){
       await loadUserRole(session.user);
-    } else if(event === 'SIGNED_OUT'){
+    } else {
       showAuthScreen();
     }
-  });
+
+    sb.auth.onAuthStateChange(async (event, session) => {
+      if(event === 'SIGNED_IN' && session){
+        await loadUserRole(session.user);
+      } else if(event === 'SIGNED_OUT'){
+        state.currentUser = null;
+        state.currentRole = null;
+        state.loadError = null;
+        showAuthScreen();
+      }
+    });
+  } catch (err) {
+    console.error('initAuth failed:', err);
+    showFatalError('Authentication failed', err);
+  }
 }
 
 async function loadUserRole(user){
-  state.currentUser = user;
-  const {data, error} = await sb.from('user_roles').select('*').eq('user_id', user.id).single();
-  if(error || !data){
-    // First user ever? Make them admin automatically
-    const {count} = await sb.from('user_roles').select('*', {count:'exact',head:true});
-    if(count === 0){
-      await sb.from('user_roles').insert({user_id:user.id, email:user.email, role:'admin'});
-      state.currentRole = 'admin';
+  try {
+    state.currentUser = user;
+
+    const {data, error} = await sb.from('user_roles').select('*').eq('user_id', user.id).single();
+
+    if(error || !data){
+      const {count, error:countError} = await sb.from('user_roles').select('*', {count:'exact', head:true});
+      if (countError) throw countError;
+
+      if(count === 0){
+        const { error:insertError } = await sb.from('user_roles').insert({user_id:user.id, email:user.email, role:'admin'});
+        if (insertError) throw insertError;
+        state.currentRole = 'admin';
+      } else {
+        showAccessDenied(user.email);
+        return;
+      }
     } else {
-      // Not invited — show access denied
-      showAccessDenied(user.email);
-      return;
+      state.currentRole = data.role;
     }
-  } else {
-    state.currentRole = data.role;
+
+    showApp();
+    await loadAllData();
+  } catch (err) {
+    console.error('loadUserRole failed:', err);
+    showFatalError('Could not load user role', err);
   }
-  showApp();
-  await loadAllData();
 }
 
 function showAuthScreen(){
@@ -336,14 +356,16 @@ function showApp(){
   document.getElementById('loading-overlay').style.display = 'none';
   document.getElementById('auth-screen').style.display = 'none';
   document.getElementById('app').style.display = 'flex';
-  // Update user bar
-  document.getElementById('user-bar-email').textContent = state.currentUser.email;
+
+  document.getElementById('user-bar-email').textContent = safeText(state.currentUser?.email || 'signed in');
   const roleEl = document.getElementById('user-bar-role');
-  roleEl.textContent = state.currentRole.charAt(0).toUpperCase() + state.currentRole.slice(1);
-  roleEl.className = 'user-bar-role role-' + state.currentRole;
-  // Show Users nav only to admins
+  roleEl.textContent = state.currentRole ? state.currentRole.charAt(0).toUpperCase() + state.currentRole.slice(1) : '';
+  roleEl.className = 'user-bar-role role-' + (state.currentRole || 'viewer');
+
   if(state.currentRole === 'admin'){
     document.getElementById('nav-users').style.display = 'flex';
+  } else {
+    document.getElementById('nav-users').style.display = 'none';
   }
 }
 
@@ -353,7 +375,7 @@ function showAccessDenied(email){
   document.getElementById('auth-inner').innerHTML = `
     <div style="font-size:32px;margin-bottom:12px">🔒</div>
     <div class="auth-title">Access Denied</div>
-    <div class="auth-msg"><strong>${email}</strong> has not been invited to this workspace.<br><br>Please contact your administrator to request access.</div>
+    <div class="auth-msg"><strong>${safeText(email)}</strong> has not been invited to this workspace.<br><br>Please contact your administrator to request access.</div>
     <div style="margin-top:16px"><button class="auth-btn" onclick="signOut()">Sign out</button></div>
   `;
   document.getElementById('auth-inner').style.display='';
@@ -363,10 +385,18 @@ async function sendMagicLink(){
   const email = document.getElementById('auth-email').value.trim();
   const errEl = document.getElementById('auth-err');
   errEl.style.display='none';
-  if(!email || !email.includes('@')){errEl.textContent='Please enter a valid email.';errEl.style.display='block';return;}
+
+  if(!email || !email.includes('@')){
+    errEl.textContent='Please enter a valid email.';
+    errEl.style.display='block';
+    return;
+  }
+
   document.getElementById('auth-btn').disabled = true;
   document.getElementById('auth-btn').textContent = 'Sending…';
+
   const {error} = await sb.auth.signInWithOtp({email, options:{emailRedirectTo: window.location.href}});
+
   if(error){
     errEl.textContent = error.message;
     errEl.style.display='block';
@@ -381,80 +411,218 @@ async function sendMagicLink(){
 
 async function signOut(){
   await sb.auth.signOut();
-  state.currentUser=null;state.currentRole=null;
+  state.currentUser=null;
+  state.currentRole=null;
+  state.loadError=null;
 }
 
-// ── Data Loading ──────────────────────────────────────────────
 async function loadAllData(){
   showLoading(true);
-  const [pRes, eRes, sRes] = await Promise.all([
-    sb.from('providers').select('*').order('id'),
-    sb.from('enrollments').select('*').order('id'),
-    sb.from('settings').select('*').single(),
-  ]);
-  state.providers = (pRes.data||[]).map(mapProvider);
-  state.enrollments = (eRes.data||[]).map(mapEnrollment);
-  state.settings = mapSettings(sRes.data||{});
-  showLoading(false);
-  render();
-  // Real-time subscriptions
-  sb.channel('db-changes')
-    .on('postgres_changes',{event:'*',schema:'public',table:'providers'}, ()=>reloadProviders())
-    .on('postgres_changes',{event:'*',schema:'public',table:'enrollments'}, ()=>reloadEnrollments())
-    .subscribe();
-}
-async function reloadProviders(){
-  const {data}=await sb.from('providers').select('*').order('id');
-  state.providers=(data||[]).map(mapProvider);render();
-}
-async function reloadEnrollments(){
-  const {data}=await sb.from('enrollments').select('*').order('id');
-  state.enrollments=(data||[]).map(mapEnrollment);render();
+  state.loadError = null;
+
+  try {
+    const [pRes, eRes, sRes] = await Promise.all([
+      sb.from('providers').select('*').order('id'),
+      sb.from('enrollments').select('*').order('id'),
+      sb.from('settings').select('*').single(),
+    ]);
+
+    console.log('providers result', pRes);
+    console.log('enrollments result', eRes);
+    console.log('settings result', sRes);
+
+    if (pRes.error) throw new Error('providers: ' + pRes.error.message);
+    if (eRes.error) throw new Error('enrollments: ' + eRes.error.message);
+    if (sRes.error) throw new Error('settings: ' + sRes.error.message);
+
+    state.providers = (pRes.data || []).map(mapProvider);
+    state.enrollments = (eRes.data || []).map(mapEnrollment);
+    state.settings = mapSettings(sRes.data || {});
+
+    if (!state.realtimeSubscribed) {
+      state.realtimeSubscribed = true;
+      sb.channel('db-changes')
+        .on('postgres_changes',{event:'*',schema:'public',table:'providers'}, ()=>reloadProviders())
+        .on('postgres_changes',{event:'*',schema:'public',table:'enrollments'}, ()=>reloadEnrollments())
+        .subscribe();
+    }
+
+    render();
+  } catch (err) {
+    console.error('loadAllData failed:', err);
+    state.loadError = err.message || String(err);
+    render();
+    showToast('Load failed: ' + state.loadError);
+  } finally {
+    showLoading(false);
+  }
 }
 
-// snake_case → camelCase mappers
-function mapProvider(r){if(!r)return r;return{id:r.id,name:r.name,credentials:r.credentials,npi:r.npi,license:r.license,licenseExp:r.license_exp,caqhId:r.caqh_id,caqhDue:r.caqh_due,medicaidId:r.medicaid_id,startDate:r.start_date,status:r.status,malpracticeExp:r.malpractice_exp,deaExp:r.dea_exp,cprExp:r.cpr_exp,type:r.type,supervisorId:r.supervisor_id,notes:r.notes};}
-function mapEnrollment(r){if(!r)return r;return{id:r.id,providerId:r.provider_id,payer:r.payer,submitted:r.submitted,effective:r.effective,status:r.status,recredDue:r.recred_due,contract:r.contract,eft:r.eft,era:r.era,lastFollowUp:r.last_follow_up,nextFollowUp:r.next_follow_up,notes:r.notes};}
-function mapSettings(r){if(!r)return{};return{practiceName:r.practice_name,taxId:r.tax_id,groupNpi:r.group_npi,address:r.address,alertLicense:r.alert_license||90,alertMalpractice:r.alert_malpractice||90,alertDea:r.alert_dea||60,alertCaqh:r.alert_caqh||30,alertCpr:r.alert_cpr||60};}
+async function reloadProviders(){
+  const {data, error} = await sb.from('providers').select('*').order('id');
+  if (error) {
+    console.error('reloadProviders failed:', error);
+    showToast('Providers reload failed: ' + error.message);
+    return;
+  }
+  state.providers = (data || []).map(mapProvider);
+  render();
+}
+
+async function reloadEnrollments(){
+  const {data, error} = await sb.from('enrollments').select('*').order('id');
+  if (error) {
+    console.error('reloadEnrollments failed:', error);
+    showToast('Enrollments reload failed: ' + error.message);
+    return;
+  }
+  state.enrollments = (data || []).map(mapEnrollment);
+  render();
+}
+
+function mapProvider(r){
+  if(!r) return r;
+  return {
+    id:r.id,
+    name:r.name,
+    credentials:r.credentials,
+    npi:r.npi,
+    license:r.license,
+    licenseExp:r.license_exp,
+    caqhId:r.caqh_id,
+    caqhDue:r.caqh_due,
+    medicaidId:r.medicaid_id,
+    startDate:r.start_date,
+    status:r.status,
+    malpracticeExp:r.malpractice_exp,
+    deaExp:r.dea_exp,
+    cprExp:r.cpr_exp,
+    type:r.type,
+    supervisorId:r.supervisor_id,
+    notes:r.notes
+  };
+}
+
+function mapEnrollment(r){
+  if(!r) return r;
+  return {
+    id:r.id,
+    providerId:r.provider_id,
+    payer:r.payer,
+    submitted:r.submitted,
+    effective:r.effective,
+    status:r.status,
+    recredDue:r.recred_due,
+    contract:r.contract,
+    eft:r.eft,
+    era:r.era,
+    lastFollowUp:r.last_follow_up,
+    nextFollowUp:r.next_follow_up,
+    notes:r.notes
+  };
+}
+
+function mapSettings(r){
+  if(!r) return {};
+  return {
+    practiceName:r.practice_name,
+    taxId:r.tax_id,
+    groupNpi:r.group_npi,
+    address:r.address,
+    alertLicense:r.alert_license || 90,
+    alertMalpractice:r.alert_malpractice || 90,
+    alertDea:r.alert_dea || 60,
+    alertCaqh:r.alert_caqh || 30,
+    alertCpr:r.alert_cpr || 60
+  };
+}
 
 function showLoading(on){
   const el=document.getElementById('loading-overlay');
-  if(on){el.style.display='flex';}else{el.style.display='none';}
+  el.style.display = on ? 'flex' : 'none';
 }
-function flashSave(){const el=document.getElementById('save-indicator');el.classList.add('show');setTimeout(()=>el.classList.remove('show'),1800);}
-function showToast(msg){const el=document.getElementById('toast');el.textContent=msg;el.classList.add('show');setTimeout(()=>el.classList.remove('show'),2500);}
 
-// ── Permission guards ─────────────────────────────────────────
+function flashSave(){
+  const el=document.getElementById('save-indicator');
+  el.classList.add('show');
+  setTimeout(()=>el.classList.remove('show'),1800);
+}
+
+function showToast(msg){
+  const el=document.getElementById('toast');
+  el.textContent=msg;
+  el.classList.add('show');
+  setTimeout(()=>el.classList.remove('show'),2500);
+}
+
+function showFatalError(title, err){
+  document.getElementById('loading-overlay').style.display = 'none';
+  document.getElementById('auth-screen').style.display = 'none';
+  document.getElementById('app').style.display = 'flex';
+  document.getElementById('main-content').innerHTML = `
+    <div class="topbar"><h1>${safeText(title)}</h1></div>
+    <div class="error-box">${safeText(err?.message || err)}</div>
+    <div class="debug-box">Open the browser console for more details.</div>
+  `;
+}
+
 function canEdit(){return ['admin','editor'].includes(state.currentRole);}
 function canAdmin(){return state.currentRole==='admin';}
 function requireEdit(){if(!canEdit()){showToast('Viewers cannot make changes');return false;}return true;}
 function requireAdmin(){if(!canAdmin()){showToast('Only admins can do this');return false;}return true;}
 
-// ── Audit log ─────────────────────────────────────────────────
 async function audit(action, table, recordId, details){
   try{
-    await sb.from('audit_log').insert({user_id:state.currentUser.id,user_email:state.currentUser.email,action,table_name:table,record_id:String(recordId),details});
+    await sb.from('audit_log').insert({
+      user_id:state.currentUser?.id || null,
+      user_email:state.currentUser?.email || null,
+      action,
+      table_name:table,
+      record_id:String(recordId),
+      details
+    });
   }catch(e){}
 }
 
-// ── Helpers ───────────────────────────────────────────────────
 function today(){return new Date();}
-function parseDate(s){return s?new Date(s+' 00:00:00'):null;}
+function parseDate(s){return s ? new Date(s+' 00:00:00') : null;}
 function daysUntil(d){if(!d)return null;return Math.round((parseDate(d)-today())/(86400000));}
 function formatDate(s){if(!s)return '—';const d=parseDate(s);return d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});}
 function ebClass(days){if(days===null)return 'eb-ok';if(days<0)return 'eb-exp';if(days<=30)return 'eb-d30';if(days<=60)return 'eb-d60';if(days<=90)return 'eb-d90';return 'eb-ok';}
-function avatarColor(id){return COLORS[(id-1)%COLORS.length];}
-function initials(name){return name.split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase();}
+function avatarColor(id){return COLORS[((id || 1)-1)%COLORS.length];}
+function initials(name){return safeText(name).split(' ').filter(Boolean).map(w=>w[0]).join('').slice(0,2).toUpperCase() || 'NA';}
 function sClass(s){const m={'Effective':'s-effective','Approved':'s-approved','In Review':'s-review','Submitted':'s-submitted','Denied':'s-denied','Waiting on Provider':'s-waiting','Need Correction':'s-correction','Closed':'s-closed','Not Started':'s-not_started','Ready to Submit':'s-ready','Active':'s-active'};return m[s]||'s-pending';}
+
 function getAlerts(){
-  const alerts=[];const s=state.settings;
+  const alerts=[];const s=state.settings || {};
   state.providers.forEach(p=>{
-    const checks=[{label:'License',date:p.licenseExp,thresh:s.alertLicense||90},{label:'Malpractice',date:p.malpracticeExp,thresh:s.alertMalpractice||90},{label:'DEA Certificate',date:p.deaExp,thresh:s.alertDea||60},{label:'CAQH Attestation',date:p.caqhDue,thresh:s.alertCaqh||30},{label:'CPR / Training',date:p.cprExp,thresh:s.alertCpr||60}];
-    checks.forEach(c=>{if(!c.date)return;const d=daysUntil(c.date);if(d<=c.thresh)alerts.push({provider:p.name,providerId:p.id,label:c.label,date:c.date,days:d,type:'expiration'});});
+    const checks=[
+      {label:'License',date:p.licenseExp,thresh:s.alertLicense||90},
+      {label:'Malpractice',date:p.malpracticeExp,thresh:s.alertMalpractice||90},
+      {label:'DEA Certificate',date:p.deaExp,thresh:s.alertDea||60},
+      {label:'CAQH Attestation',date:p.caqhDue,thresh:s.alertCaqh||30},
+      {label:'CPR / Training',date:p.cprExp,thresh:s.alertCpr||60}
+    ];
+    checks.forEach(c=>{
+      if(!c.date)return;
+      const d=daysUntil(c.date);
+      if(d<=c.thresh)alerts.push({provider:p.name,providerId:p.id,label:c.label,date:c.date,days:d,type:'expiration'});
+    });
   });
-  state.enrollments.forEach(en=>{if(en.nextFollowUp){const d=daysUntil(en.nextFollowUp);if(d<0){const p=state.providers.find(x=>x.id===en.providerId);alerts.push({provider:p?p.name:'',providerId:en.providerId,label:'Follow-up: '+en.payer,date:en.nextFollowUp,days:d,type:'followup'});}}});
+
+  state.enrollments.forEach(en=>{
+    if(en.nextFollowUp){
+      const d=daysUntil(en.nextFollowUp);
+      if(d<0){
+        const p=state.providers.find(x=>x.id===en.providerId);
+        alerts.push({provider:p?p.name:'',providerId:en.providerId,label:'Follow-up: '+en.payer,date:en.nextFollowUp,days:d,type:'followup'});
+      }
+    }
+  });
+
   return alerts.sort((a,b)=>a.days-b.days);
 }
+
 function getProviderSummary(p){
   const enls=state.enrollments.filter(e=>e.providerId===p.id);
   const active=enls.filter(e=>e.status==='Effective'||e.status==='Approved').length;
@@ -465,177 +633,232 @@ function getProviderSummary(p){
   return{active,inProgress,alerts,nextExp};
 }
 
-// ── Navigation ────────────────────────────────────────────────
 function navigate(view){
   state.currentView=view;
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
   const el=document.getElementById('nav-'+view);if(el)el.classList.add('active');
   render();
 }
+
 function viewProvider(id){
-  state.selectedProvider=id;state.currentView='provider-detail';
+  state.selectedProvider=id;
+  state.currentView='provider-detail';
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
   const el=document.getElementById('nav-providers');if(el)el.classList.add('active');
   render();
 }
 
-// ── Render dispatcher ─────────────────────────────────────────
+function renderGlobalError(){
+  if (!state.loadError) return '';
+  return `<div class="error-box">Supabase load error: ${safeText(state.loadError)}</div>`;
+}
+
 function render(){
   const alerts=getAlerts();
   const badge=document.getElementById('alert-badge');
   if(badge)badge.textContent=alerts.length;
+
   const main=document.getElementById('main-content');
   if(!main)return;
+
+  let html = '';
   switch(state.currentView){
-    case 'dashboard':main.innerHTML=renderDashboard();break;
-    case 'providers':main.innerHTML=renderProviders();break;
-    case 'provider-detail':main.innerHTML=renderProviderDetail();break;
-    case 'enrollments':main.innerHTML=renderEnrollments();break;
-    case 'alerts':main.innerHTML=renderAlerts();break;
-    case 'intake':main.innerHTML=renderIntake();break;
-    case 'supervisor':main.innerHTML=renderSupervisor();break;
-    case 'users':main.innerHTML=renderUsers();break;
-    case 'settings':main.innerHTML=renderSettings();break;
-    default:main.innerHTML=renderDashboard();
+    case 'dashboard': html = renderDashboard(); break;
+    case 'providers': html = renderProviders(); break;
+    case 'provider-detail': html = renderProviderDetail(); break;
+    case 'enrollments': html = renderEnrollments(); break;
+    case 'alerts': html = renderAlerts(); break;
+    case 'intake': html = renderIntake(); break;
+    case 'supervisor': html = renderSupervisor(); break;
+    case 'users': html = renderUsers(); break;
+    case 'settings': html = renderSettings(); break;
+    default: html = renderDashboard();
+  }
+
+  main.innerHTML = renderGlobalError() + html;
+
+  if(state.currentView==='users'){
+    setTimeout(loadUsersContent, 50);
   }
 }
 
-// ── All render functions are identical to original ────────────
-// (Dashboard, Providers, Provider Detail, Enrollments, Alerts, Intake, Supervisor)
 function renderDashboard(){
-  const alerts=getAlerts();const allEnl=state.enrollments;
+  const alerts=getAlerts();
+  const allEnl=state.enrollments;
   const inProgress=allEnl.filter(e=>['Submitted','In Review','Ready to Submit','Waiting on Provider','Need Correction'].includes(e.status)).length;
-  const expired=alerts.filter(a=>a.days<0).length;const upcoming=alerts.filter(a=>a.days>=0&&a.days<=30).length;
+  const expired=alerts.filter(a=>a.days<0).length;
+  const upcoming=alerts.filter(a=>a.days>=0&&a.days<=30).length;
   const overdue=allEnl.filter(e=>e.nextFollowUp&&daysUntil(e.nextFollowUp)<0).length;
   const stageCount={};STATUS_STAGES.forEach(s=>stageCount[s]=0);allEnl.forEach(e=>{if(stageCount[e.status]!==undefined)stageCount[e.status]++;});
-  const alertHTML=alerts.slice(0,7).map(a=>{const cls=a.days<0?'expired':a.days<=30?'days30':a.days<=60?'days60':'days90';const dotC=a.days<0?'#ef4444':a.days<=30?'#f97316':a.days<=60?'#fbbf24':'#4ade80';const msg=a.days<0?`Expired ${Math.abs(a.days)} days ago`:`Expires in ${a.days} days`;return`<div class="alert-item ${cls}"><div class="dot" style="background:${dotC};margin-top:4px"></div><div style="flex:1"><strong style="display:block;font-size:12px">${a.provider} — ${a.label}</strong><span style="font-size:11px;color:var(--gray)">${msg}</span></div></div>`;}).join('');
-  const followHTML=allEnl.filter(e=>e.nextFollowUp&&daysUntil(e.nextFollowUp)<=5).slice(0,6).map(e=>{const p=state.providers.find(x=>x.id===e.providerId);const d=daysUntil(e.nextFollowUp);const c=d<0?'#ef4444':d<=2?'#f97316':'#fbbf24';return`<div class="follow-up-item"><div class="dot" style="background:${c}"></div><div style="flex:1"><strong>${p?p.name:''}</strong><div style="color:var(--gray)">${e.payer}</div></div><div style="color:${c};font-weight:600;white-space:nowrap">${d<0?Math.abs(d)+'d overdue':d+'d'}</div></div>`;}).join('');
-  return`<div class="topbar"><h1>Dashboard</h1><div class="topbar-actions"><span style="font-size:12px;color:var(--gray)">${new Date().toLocaleDateString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric'})}</span></div></div>
+
+  const alertHTML=alerts.slice(0,7).map(a=>{
+    const cls=a.days<0?'expired':a.days<=30?'days30':a.days<=60?'days60':'days90';
+    const dotC=a.days<0?'#ef4444':a.days<=30?'#f97316':a.days<=60?'#fbbf24':'#4ade80';
+    const msg=a.days<0?`Expired ${Math.abs(a.days)} days ago`:`Expires in ${a.days} days`;
+    return `<div class="alert-item ${cls}"><div class="dot" style="background:${dotC};margin-top:4px"></div><div style="flex:1"><strong style="display:block;font-size:12px">${safeText(a.provider)} — ${safeText(a.label)}</strong><span style="font-size:11px;color:var(--gray)">${msg}</span></div></div>`;
+  }).join('');
+
+  const followHTML=allEnl.filter(e=>e.nextFollowUp&&daysUntil(e.nextFollowUp)<=5).slice(0,6).map(e=>{
+    const p=state.providers.find(x=>x.id===e.providerId);
+    const d=daysUntil(e.nextFollowUp);
+    const c=d<0?'#ef4444':d<=2?'#f97316':'#fbbf24';
+    return `<div class="follow-up-item"><div class="dot" style="background:${c}"></div><div style="flex:1"><strong>${safeText(p?p.name:'')}</strong><div style="color:var(--gray)">${safeText(e.payer)}</div></div><div style="color:${c};font-weight:600;white-space:nowrap">${d<0?Math.abs(d)+'d overdue':d+'d'}</div></div>`;
+  }).join('');
+
+  return `<div class="topbar"><h1>Dashboard</h1><div class="topbar-actions"><span style="font-size:12px;color:var(--gray)">${new Date().toLocaleDateString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric'})}</span></div></div>
 <div class="content">
 <div class="grid-4" style="margin-bottom:16px"><div class="metric"><div class="metric-label">In Progress</div><div class="metric-value">${inProgress}</div><div class="metric-sub">payer applications</div></div><div class="metric ${upcoming>0?'warn':''}"><div class="metric-label">Expiring (30 days)</div><div class="metric-value">${upcoming}</div><div class="metric-sub">items need attention</div></div><div class="metric ${expired>0?'danger':''}"><div class="metric-label">Expired / Overdue</div><div class="metric-value">${expired}</div><div class="metric-sub">items past due</div></div><div class="metric ${overdue>0?'danger':''}"><div class="metric-label">Overdue Follow-ups</div><div class="metric-value">${overdue}</div><div class="metric-sub">past follow-up date</div></div></div>
 <div class="card" style="margin-bottom:16px"><div class="card-header"><span class="card-title">Enrollment Pipeline</span></div><div style="display:flex;flex-wrap:wrap;gap:8px">${STATUS_STAGES.map(s=>`<div style="flex:1;min-width:70px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px 10px;text-align:center"><div style="font-size:20px;font-weight:700;color:var(--c1)">${stageCount[s]}</div><div style="font-size:10px;color:var(--gray);margin-top:2px;line-height:1.3">${s}</div></div>`).join('')}</div></div>
-<div class="panel-row"><div class="panel-left"><div class="card"><div class="card-header"><span class="card-title">Provider Summary</span><button class="btn btn-primary btn-sm" onclick="navigate('providers')">View All</button></div><div style="overflow-x:auto"><table class="table"><thead><tr><th>Provider</th><th>Active Payers</th><th>In Progress</th><th>Alerts</th><th>Next Expiry</th><th></th></tr></thead><tbody>${state.providers.map(p=>{const s=getProviderSummary(p);const sup=p.supervisorId?state.providers.find(x=>x.id===p.supervisorId):null;return`<tr><td><div style="display:flex;align-items:center;gap:8px"><div class="provider-avatar" style="background:${avatarColor(p.id)}20;color:${avatarColor(p.id)}">${initials(p.name)}</div><div><div style="font-weight:500">${p.name}</div><div style="font-size:11px;color:var(--gray)">${p.credentials}${p.type==='associate'?' · Associate':p.type==='supervisor'?' · Supervisor':''}</div>${sup?`<div style="font-size:10px;color:#7c3aed">Under: ${sup.name}</div>`:''}</div></div></td><td><span style="font-weight:700;color:var(--green)">${s.active}</span></td><td>${s.inProgress}</td><td>${s.alerts>0?`<span style="color:var(--red);font-weight:700">${s.alerts}</span>`:'—'}</td><td>${s.nextExp!==null?`<span class="expiry-badge ${ebClass(s.nextExp)}">${s.nextExp<0?'EXPIRED':s.nextExp+'d'}</span>`:'—'}</td><td><button class="btn btn-outline btn-sm" onclick="viewProvider(${p.id})">View</button></td></tr>`;}).join('')}</tbody></table></div></div></div>
+<div class="panel-row"><div class="panel-left"><div class="card"><div class="card-header"><span class="card-title">Provider Summary</span><button class="btn btn-primary btn-sm" onclick="navigate('providers')">View All</button></div><div style="overflow-x:auto"><table class="table"><thead><tr><th>Provider</th><th>Active Payers</th><th>In Progress</th><th>Alerts</th><th>Next Expiry</th><th></th></tr></thead><tbody>${state.providers.map(p=>{const s=getProviderSummary(p);const sup=p.supervisorId?state.providers.find(x=>x.id===p.supervisorId):null;return`<tr><td><div style="display:flex;align-items:center;gap:8px"><div class="provider-avatar" style="background:${avatarColor(p.id)}20;color:${avatarColor(p.id)}">${initials(p.name)}</div><div><div style="font-weight:500">${safeText(p.name)}</div><div style="font-size:11px;color:var(--gray)">${safeText(p.credentials)}${p.type==='associate'?' · Associate':p.type==='supervisor'?' · Supervisor':''}</div>${sup?`<div style="font-size:10px;color:#7c3aed">Under: ${safeText(sup.name)}</div>`:''}</div></div></td><td><span style="font-weight:700;color:var(--green)">${s.active}</span></td><td>${s.inProgress}</td><td>${s.alerts>0?`<span style="color:var(--red);font-weight:700">${s.alerts}</span>`:'—'}</td><td>${s.nextExp!==null?`<span class="expiry-badge ${ebClass(s.nextExp)}">${s.nextExp<0?'EXPIRED':s.nextExp+'d'}</span>`:'—'}</td><td><button class="btn btn-outline btn-sm" onclick="viewProvider(${p.id})">View</button></td></tr>`;}).join('')}</tbody></table></div></div></div>
 <div class="panel-right"><div class="card" style="margin-bottom:16px"><div class="card-header"><span class="card-title">Upcoming Alerts</span><button class="btn btn-outline btn-sm" onclick="navigate('alerts')">All ${alerts.length}</button></div>${alertHTML||'<div class="empty-state"><p>No alerts right now</p></div>'}</div><div class="card"><div class="card-header"><span class="card-title">Follow-ups Due Soon</span></div>${followHTML||'<div class="empty-state" style="padding:16px"><p>No follow-ups overdue</p></div>'}</div></div></div></div>`;
 }
+
 function renderProviders(){
   const s=state.search.toLowerCase();
-  const filtered=state.providers.filter(p=>!s||p.name.toLowerCase().includes(s)||p.credentials.toLowerCase().includes(s)||p.npi.includes(s));
-  return`<div class="topbar"><h1>Providers (${state.providers.length})</h1><div class="topbar-actions"><input class="search-input" placeholder="Search name, credentials, NPI..." value="${state.search}" oninput="state.search=this.value;render()">${canEdit()?`<button class="btn btn-primary" onclick="openAddProvider()">+ Add Provider</button>`:''}</div></div>
+  const filtered=state.providers.filter(p=>!s||safeText(p.name).toLowerCase().includes(s)||safeText(p.credentials).toLowerCase().includes(s)||safeText(p.npi).includes(s));
+  return `<div class="topbar"><h1>Providers (${state.providers.length})</h1><div class="topbar-actions"><input class="search-input" placeholder="Search name, credentials, NPI..." value="${safeText(state.search)}" oninput="state.search=this.value;render()">${canEdit()?`<button class="btn btn-primary" onclick="openAddProvider()">+ Add Provider</button>`:''}</div></div>
 <div class="content"><div class="card"><div style="overflow-x:auto"><table class="table"><thead><tr><th>Provider</th><th>Type</th><th>NPI</th><th>CAQH ID</th><th>Active Payers</th><th>In Progress</th><th>Next Expiry</th><th>Alerts</th><th></th></tr></thead><tbody>
 ${filtered.length===0?`<tr><td colspan="9" style="text-align:center;padding:30px;color:var(--gray)">No providers found</td></tr>`:''}
 ${filtered.map(p=>{const sum=getProviderSummary(p);const sup=p.supervisorId?state.providers.find(x=>x.id===p.supervisorId):null;const typeBg=p.type==='associate'?'#f3e8ff':p.type==='supervisor'?'#dbeafe':'#f0fdf4';const typeColor=p.type==='associate'?'#7c3aed':p.type==='supervisor'?'#1d4ed8':'#16a34a';
-return`<tr><td><div style="display:flex;align-items:center;gap:10px"><div class="provider-avatar" style="background:${avatarColor(p.id)}20;color:${avatarColor(p.id)}">${initials(p.name)}</div><div><div style="font-weight:600;cursor:pointer;color:var(--c2)" onclick="viewProvider(${p.id})">${p.name}, ${p.credentials}</div>${sup?`<div style="font-size:11px;color:#7c3aed">↳ Under: ${sup.name}</div>`:''}</div></div></td>
+return `<tr><td><div style="display:flex;align-items:center;gap:10px"><div class="provider-avatar" style="background:${avatarColor(p.id)}20;color:${avatarColor(p.id)}">${initials(p.name)}</div><div><div style="font-weight:600;cursor:pointer;color:var(--c2)" onclick="viewProvider(${p.id})">${safeText(p.name)}, ${safeText(p.credentials)}</div>${sup?`<div style="font-size:11px;color:#7c3aed">↳ Under: ${safeText(sup.name)}</div>`:''}</div></div></td>
 <td><span style="padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600;background:${typeBg};color:${typeColor}">${p.type==='associate'?'Associate':p.type==='supervisor'?'Supervisor':'Independent'}</span></td>
-<td style="font-family:monospace;font-size:12px">${p.npi}</td><td style="font-family:monospace;font-size:12px">${p.caqhId||'—'}</td>
+<td style="font-family:monospace;font-size:12px">${safeText(p.npi) || '—'}</td><td style="font-family:monospace;font-size:12px">${safeText(p.caqhId) || '—'}</td>
 <td><span style="font-weight:700;color:var(--green)">${sum.active}</span></td><td>${sum.inProgress}</td>
 <td>${sum.nextExp!==null?`<span class="expiry-badge ${ebClass(sum.nextExp)}">${sum.nextExp<0?'EXPIRED':sum.nextExp+'d'}</span>`:'—'}</td>
 <td>${sum.alerts>0?`<span style="background:#fee2e2;color:#dc2626;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:700">${sum.alerts}</span>`:'—'}</td>
 <td><button class="btn btn-outline btn-sm" onclick="viewProvider(${p.id})">View</button></td></tr>`;}).join('')}
 </tbody></table></div></div></div>`;
 }
+
 function renderProviderDetail(){
-  const p=state.providers.find(x=>x.id===state.selectedProvider);if(!p)return renderProviders();
+  const p=state.providers.find(x=>x.id===state.selectedProvider);
+  if(!p)return renderProviders();
+
   const enls=state.enrollments.filter(e=>e.providerId===p.id);
   const sup=p.supervisorId?state.providers.find(x=>x.id===p.supervisorId):null;
   const associates=state.providers.filter(x=>x.supervisorId===p.id);
   const docs=[{label:'License',date:p.licenseExp},{label:'Malpractice Insurance',date:p.malpracticeExp},{label:'DEA Certificate',date:p.deaExp},{label:'CAQH Attestation Due',date:p.caqhDue},{label:'CPR / Training',date:p.cprExp}];
-  return`<div class="topbar"><button class="btn btn-outline btn-sm" onclick="navigate('providers')">← Providers</button><h1>${p.name}, ${p.credentials}</h1><div class="topbar-actions"><span class="status-badge ${sClass(p.status)}">${p.status}</span>${canEdit()?`<button class="btn btn-outline" onclick="openEditProvider(${p.id})">Edit Profile</button><button class="btn btn-primary" onclick="openAddEnrollment(${p.id})">+ Add Payer</button>`:''}</div></div>
+
+  return `<div class="topbar"><button class="btn btn-outline btn-sm" onclick="navigate('providers')">← Providers</button><h1>${safeText(p.name)}, ${safeText(p.credentials)}</h1><div class="topbar-actions"><span class="status-badge ${sClass(p.status)}">${safeText(p.status)}</span>${canEdit()?`<button class="btn btn-outline" onclick="openEditProvider(${p.id})">Edit Profile</button><button class="btn btn-primary" onclick="openAddEnrollment(${p.id})">+ Add Payer</button>`:''}</div></div>
 <div class="content"><div class="panel-row"><div class="panel-left">
 <div class="card" style="margin-bottom:16px"><div class="card-header"><span class="card-title">Provider Profile</span></div><div class="form-row">
-<div>${[['Full Name',p.name+', '+p.credentials],['NPI Number',p.npi],['License #',p.license||'—'],['CAQH ID',p.caqhId||'—'],['Medicaid / DMAP ID',p.medicaidId||'—']].map(([l,v])=>`<div class="info-row"><span class="info-label">${l}</span><span class="info-value">${v}</span></div>`).join('')}</div>
-<div>${[['Start Date',formatDate(p.startDate)],['Provider Type',p.type==='associate'?'Associate':p.type==='supervisor'?'Supervisor':'Independent'],['Supervisor',sup?sup.name:'N/A'],['Status',p.status]].map(([l,v])=>`<div class="info-row"><span class="info-label">${l}</span><span class="info-value">${v}</span></div>`).join('')}<div class="info-row"><span class="info-label">Notes</span><span class="info-value" style="font-size:12px;color:var(--gray)">${p.notes||'—'}</span></div></div>
-</div>${associates.length?`<div class="section-title" style="margin-top:14px">Supervised Associates</div><div>${associates.map(a=>`<span class="assoc-tag">${a.name}, ${a.credentials}</span>`).join('')}</div>`:''}</div>
+<div>${[['Full Name',safeText(p.name)+', '+safeText(p.credentials)],['NPI Number',safeText(p.npi)||'—'],['License #',safeText(p.license)||'—'],['CAQH ID',safeText(p.caqhId)||'—'],['Medicaid / DMAP ID',safeText(p.medicaidId)||'—']].map(([l,v])=>`<div class="info-row"><span class="info-label">${l}</span><span class="info-value">${v}</span></div>`).join('')}</div>
+<div>${[['Start Date',formatDate(p.startDate)],['Provider Type',p.type==='associate'?'Associate':p.type==='supervisor'?'Supervisor':'Independent'],['Supervisor',sup?safeText(sup.name):'N/A'],['Status',safeText(p.status)]].map(([l,v])=>`<div class="info-row"><span class="info-label">${l}</span><span class="info-value">${v}</span></div>`).join('')}<div class="info-row"><span class="info-label">Notes</span><span class="info-value" style="font-size:12px;color:var(--gray)">${safeText(p.notes)||'—'}</span></div></div>
+</div>${associates.length?`<div class="section-title" style="margin-top:14px">Supervised Associates</div><div>${associates.map(a=>`<span class="assoc-tag">${safeText(a.name)}, ${safeText(a.credentials)}</span>`).join('')}</div>`:''}</div>
 <div class="card"><div class="card-header"><span class="card-title">Payer Enrollments (${enls.length})</span></div>
 ${enls.length===0?`<div class="empty-state"><p>No payer enrollments yet.</p>${canEdit()?`<button class="btn btn-primary" style="margin-top:12px" onclick="openAddEnrollment(${p.id})">Add First Payer</button>`:''}</div>`:
-enls.map(e=>`<div class="payer-row"><div class="payer-row-header"><span class="payer-name">${e.payer}</span><div style="display:flex;gap:6px;align-items:center"><span class="status-badge ${sClass(e.status)}">${e.status}</span>${canEdit()?`<button class="btn btn-outline btn-sm" onclick="openEditEnrollment(${e.id})">Edit</button>`:''}</div></div>
-<div class="payer-detail"><div><div class="payer-field-label">Submitted</div><div class="payer-field-value">${formatDate(e.submitted)}</div></div><div><div class="payer-field-label">Effective</div><div class="payer-field-value">${formatDate(e.effective)}</div></div><div><div class="payer-field-label">Recred Due</div><div class="payer-field-value">${e.recredDue?`${formatDate(e.recredDue)} <span class="expiry-badge ${ebClass(daysUntil(e.recredDue))}" style="font-size:10px">${daysUntil(e.recredDue)<0?'DUE':daysUntil(e.recredDue)+'d'}</span>`:'—'}</div></div><div><div class="payer-field-label">Contract</div><div class="payer-field-value">${e.contract||'—'}</div></div><div><div class="payer-field-label">EFT / ERA</div><div class="payer-field-value">${e.eft} / ${e.era}</div></div><div><div class="payer-field-label">Next Follow-up</div><div class="payer-field-value" style="color:${e.nextFollowUp&&daysUntil(e.nextFollowUp)<0?'var(--red)':e.nextFollowUp&&daysUntil(e.nextFollowUp)<=3?'var(--amber)':'inherit'};font-weight:${e.nextFollowUp&&daysUntil(e.nextFollowUp)<=3?'600':'400'}">${formatDate(e.nextFollowUp)}</div></div></div>
-${e.notes?`<div style="font-size:12px;color:var(--gray);margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">📝 ${e.notes}</div>`:''}</div>`).join('')}
+enls.map(e=>`<div class="payer-row"><div class="payer-row-header"><span class="payer-name">${safeText(e.payer)}</span><div style="display:flex;gap:6px;align-items:center"><span class="status-badge ${sClass(e.status)}">${safeText(e.status)}</span>${canEdit()?`<button class="btn btn-outline btn-sm" onclick="openEditEnrollment(${e.id})">Edit</button>`:''}</div></div>
+<div class="payer-detail"><div><div class="payer-field-label">Submitted</div><div class="payer-field-value">${formatDate(e.submitted)}</div></div><div><div class="payer-field-label">Effective</div><div class="payer-field-value">${formatDate(e.effective)}</div></div><div><div class="payer-field-label">Recred Due</div><div class="payer-field-value">${e.recredDue?`${formatDate(e.recredDue)} <span class="expiry-badge ${ebClass(daysUntil(e.recredDue))}" style="font-size:10px">${daysUntil(e.recredDue)<0?'DUE':daysUntil(e.recredDue)+'d'}</span>`:'—'}</div></div><div><div class="payer-field-label">Contract</div><div class="payer-field-value">${safeText(e.contract)||'—'}</div></div><div><div class="payer-field-label">EFT / ERA</div><div class="payer-field-value">${safeText(e.eft)} / ${safeText(e.era)}</div></div><div><div class="payer-field-label">Next Follow-up</div><div class="payer-field-value" style="color:${e.nextFollowUp&&daysUntil(e.nextFollowUp)<0?'var(--red)':e.nextFollowUp&&daysUntil(e.nextFollowUp)<=3?'var(--amber)':'inherit'};font-weight:${e.nextFollowUp&&daysUntil(e.nextFollowUp)<=3?'600':'400'}">${formatDate(e.nextFollowUp)}</div></div></div>
+${e.notes?`<div style="font-size:12px;color:var(--gray);margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">📝 ${safeText(e.notes)}</div>`:''}</div>`).join('')}
 </div></div>
 <div class="panel-right"><div class="card" style="margin-bottom:16px"><div class="card-header"><span class="card-title">Documents & Expirations</span></div>
-${docs.map(d=>{const days=daysUntil(d.date);const cls=ebClass(days);return`<div style="display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid var(--border)"><span style="font-size:12px;font-weight:500">${d.label}</span>${d.date?`<div style="text-align:right"><div style="font-size:11px;color:var(--gray);margin-bottom:2px">${formatDate(d.date)}</div><span class="expiry-badge ${cls}">${days<0?'EXPIRED':days<=90?days+'d':'OK'}</span></div>`:'<span style="font-size:11px;color:var(--gray)">N/A</span>'}</div>`;}).join('')}
+${docs.map(d=>{const days=daysUntil(d.date);const cls=ebClass(days);return `<div style="display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid var(--border)"><span style="font-size:12px;font-weight:500">${d.label}</span>${d.date?`<div style="text-align:right"><div style="font-size:11px;color:var(--gray);margin-bottom:2px">${formatDate(d.date)}</div><span class="expiry-badge ${cls}">${days<0?'EXPIRED':days<=90?days+'d':'OK'}</span></div>`:'<span style="font-size:11px;color:var(--gray)">N/A</span>'}</div>`;}).join('')}
 </div>${canEdit()?`<div class="card"><div class="card-header"><span class="card-title">Quick Actions</span></div><div style="display:flex;flex-direction:column;gap:8px"><button class="btn btn-outline" style="width:100%;text-align:left" onclick="openAddEnrollment(${p.id})">+ Add Payer Enrollment</button><button class="btn btn-outline" style="width:100%;text-align:left" onclick="openEditProvider(${p.id})">✏️ Edit Profile & Documents</button></div></div>`:''}</div></div></div>`;
 }
+
 function renderEnrollments(){
   let enls=state.enrollments;
   if(state.filterStatus!=='all')enls=enls.filter(e=>e.status===state.filterStatus);
   if(state.filterProvider!=='all')enls=enls.filter(e=>e.providerId===parseInt(state.filterProvider));
-  if(state.search)enls=enls.filter(e=>{const p=state.providers.find(x=>x.id===e.providerId);return e.payer.toLowerCase().includes(state.search.toLowerCase())||(p&&p.name.toLowerCase().includes(state.search.toLowerCase()));});
-  return`<div class="topbar"><h1>Payer Enrollments (${enls.length})</h1><div class="topbar-actions"><input class="search-input" placeholder="Search payer or provider..." value="${state.search}" oninput="state.search=this.value;render()"><select class="select-input" onchange="state.filterProvider=this.value;render()"><option value="all">All Providers</option>${state.providers.map(p=>`<option value="${p.id}" ${state.filterProvider==p.id?'selected':''}>${p.name}</option>`).join('')}</select><select class="select-input" onchange="state.filterStatus=this.value;render()"><option value="all">All Statuses</option>${STATUS_STAGES.map(s=>`<option value="${s}" ${state.filterStatus===s?'selected':''}>${s}</option>`).join('')}</select>${canEdit()?`<button class="btn btn-primary" onclick="openAddEnrollment(null)">+ Add Enrollment</button>`:''}</div></div>
+  if(state.search)enls=enls.filter(e=>{
+    const p=state.providers.find(x=>x.id===e.providerId);
+    return safeText(e.payer).toLowerCase().includes(state.search.toLowerCase()) || (p && safeText(p.name).toLowerCase().includes(state.search.toLowerCase()));
+  });
+
+  return `<div class="topbar"><h1>Payer Enrollments (${enls.length})</h1><div class="topbar-actions"><input class="search-input" placeholder="Search payer or provider..." value="${safeText(state.search)}" oninput="state.search=this.value;render()"><select class="select-input" onchange="state.filterProvider=this.value;render()"><option value="all">All Providers</option>${state.providers.map(p=>`<option value="${p.id}" ${state.filterProvider==p.id?'selected':''}>${safeText(p.name)}</option>`).join('')}</select><select class="select-input" onchange="state.filterStatus=this.value;render()"><option value="all">All Statuses</option>${STATUS_STAGES.map(s=>`<option value="${s}" ${state.filterStatus===s?'selected':''}>${s}</option>`).join('')}</select>${canEdit()?`<button class="btn btn-primary" onclick="openAddEnrollment(null)">+ Add Enrollment</button>`:''}</div></div>
 <div class="content"><div class="card"><div style="overflow-x:auto"><table class="table"><thead><tr><th>Provider</th><th>Payer</th><th>Status</th><th>Submitted</th><th>Effective</th><th>Recred Due</th><th>EFT/ERA</th><th>Next Follow-up</th><th></th></tr></thead><tbody>
 ${enls.length===0?`<tr><td colspan="9" style="text-align:center;padding:30px;color:var(--gray)">No enrollments match filters</td></tr>`:''}
 ${enls.map(e=>{const p=state.providers.find(x=>x.id===e.providerId);const fd=daysUntil(e.nextFollowUp);const fdColor=fd!==null&&fd<0?'var(--red)':fd!==null&&fd<=3?'var(--amber)':'inherit';
-return`<tr><td><span style="cursor:pointer;color:var(--c2);font-weight:500" onclick="viewProvider(${e.providerId})">${p?p.name:'—'}</span></td><td><strong>${e.payer}</strong></td><td><span class="status-badge ${sClass(e.status)}">${e.status}</span></td><td style="font-size:12px;white-space:nowrap">${formatDate(e.submitted)}</td><td style="font-size:12px;white-space:nowrap">${formatDate(e.effective)}</td><td style="font-size:12px;white-space:nowrap">${e.recredDue?`${formatDate(e.recredDue)} <span class="expiry-badge ${ebClass(daysUntil(e.recredDue))}" style="font-size:10px">${daysUntil(e.recredDue)<0?'DUE':daysUntil(e.recredDue)+'d'}</span>`:'—'}</td><td style="font-size:12px">${e.eft}/${e.era}</td><td style="font-size:12px;color:${fdColor};font-weight:${fd!==null&&fd<=3?'600':'400'};white-space:nowrap">${formatDate(e.nextFollowUp)}</td><td>${canEdit()?`<button class="btn btn-outline btn-sm" onclick="openEditEnrollment(${e.id})">Edit</button>`:''}</td></tr>`;}).join('')}
+return `<tr><td><span style="cursor:pointer;color:var(--c2);font-weight:500" onclick="viewProvider(${e.providerId})">${safeText(p?p.name:'—')}</span></td><td><strong>${safeText(e.payer)}</strong></td><td><span class="status-badge ${sClass(e.status)}">${safeText(e.status)}</span></td><td style="font-size:12px;white-space:nowrap">${formatDate(e.submitted)}</td><td style="font-size:12px;white-space:nowrap">${formatDate(e.effective)}</td><td style="font-size:12px;white-space:nowrap">${e.recredDue?`${formatDate(e.recredDue)} <span class="expiry-badge ${ebClass(daysUntil(e.recredDue))}" style="font-size:10px">${daysUntil(e.recredDue)<0?'DUE':daysUntil(e.recredDue)+'d'}</span>`:'—'}</td><td style="font-size:12px">${safeText(e.eft)}/${safeText(e.era)}</td><td style="font-size:12px;color:${fdColor};font-weight:${fd!==null&&fd<=3?'600':'400'};white-space:nowrap">${formatDate(e.nextFollowUp)}</td><td>${canEdit()?`<button class="btn btn-outline btn-sm" onclick="openEditEnrollment(${e.id})">Edit</button>`:''}</td></tr>`;}).join('')}
 </tbody></table></div></div></div>`;
 }
+
 function renderAlerts(){
   const alerts=getAlerts();const groups={exp:[],d30:[],d60:[],d90:[]};
   alerts.forEach(a=>{if(a.days<0)groups.exp.push(a);else if(a.days<=30)groups.d30.push(a);else if(a.days<=60)groups.d60.push(a);else groups.d90.push(a);});
-  const rg=(title,items,cls,color)=>items.length===0?'':
-    `<div style="margin-bottom:20px"><div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:${color};margin-bottom:8px;padding-bottom:6px;border-bottom:2px solid ${color}40">${title} (${items.length})</div>
-    ${items.map(a=>`<div class="alert-item ${cls}" style="justify-content:space-between;align-items:center;cursor:pointer" onclick="viewProvider(${a.providerId})"><div><strong style="font-size:13px">${a.provider}</strong><div style="font-size:12px;color:var(--gray)">${a.label}${a.date?' · '+formatDate(a.date):''}</div></div><div style="text-align:right;font-size:12px;font-weight:600;color:${color};white-space:nowrap">${a.days<0?Math.abs(a.days)+' days ago':a.days+' days'}</div></div>`).join('')}</div>`;
-  return`<div class="topbar"><h1>Expiration Alerts & Reminders</h1></div>
+  const rg=(title,items,cls,color)=>items.length===0?'':`<div style="margin-bottom:20px"><div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:${color};margin-bottom:8px;padding-bottom:6px;border-bottom:2px solid ${color}40">${title} (${items.length})</div>
+    ${items.map(a=>`<div class="alert-item ${cls}" style="justify-content:space-between;align-items:center;cursor:pointer" onclick="viewProvider(${a.providerId})"><div><strong style="font-size:13px">${safeText(a.provider)}</strong><div style="font-size:12px;color:var(--gray)">${safeText(a.label)}${a.date?' · '+formatDate(a.date):''}</div></div><div style="text-align:right;font-size:12px;font-weight:600;color:${color};white-space:nowrap">${a.days<0?Math.abs(a.days)+' days ago':a.days+' days'}</div></div>`).join('')}</div>`;
+  return `<div class="topbar"><h1>Expiration Alerts & Reminders</h1></div>
 <div class="content"><div class="panel-row"><div class="panel-left">
 ${alerts.length===0?'<div class="card"><div class="empty-state"><p style="font-size:16px">✓ No active alerts!</p></div></div>':''}
 ${rg('Expired / Overdue',groups.exp,'expired','#dc2626')}${rg('Expires within 30 days',groups.d30,'days30','#c2410c')}${rg('Expires within 60 days',groups.d60,'days60','#ca8a04')}${rg('Expires within 90 days',groups.d90,'days90','#16a34a')}
 </div><div class="panel-right"><div class="card" style="margin-bottom:16px"><div class="card-header"><span class="card-title">Summary</span></div>
 ${[['Expired / Overdue',groups.exp.length,'#dc2626'],['Within 30 days',groups.d30.length,'#c2410c'],['Within 60 days',groups.d60.length,'#ca8a04'],['Within 90 days',groups.d90.length,'#16a34a']].map(([l,n,c])=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)"><span style="font-size:13px">${l}</span><span style="font-weight:700;color:${c};font-size:18px">${n}</span></div>`).join('')}
 </div><div class="card"><div class="card-header"><span class="card-title">Overdue Follow-ups</span></div>
-${state.enrollments.filter(e=>e.nextFollowUp&&daysUntil(e.nextFollowUp)<0).map(e=>{const p=state.providers.find(x=>x.id===e.providerId);const d=daysUntil(e.nextFollowUp);return`<div style="padding:8px 0;border-bottom:1px solid var(--border);cursor:pointer" onclick="openEditEnrollment(${e.id})"><div style="font-weight:500;font-size:13px">${p?p.name:''}</div><div style="font-size:12px;color:var(--red)">${e.payer} — ${Math.abs(d)} days overdue</div></div>`;}).join('')||'<p style="font-size:13px;color:var(--gray);padding:8px 0">No overdue follow-ups</p>'}
+${state.enrollments.filter(e=>e.nextFollowUp&&daysUntil(e.nextFollowUp)<0).map(e=>{const p=state.providers.find(x=>x.id===e.providerId);const d=daysUntil(e.nextFollowUp);return`<div style="padding:8px 0;border-bottom:1px solid var(--border);cursor:pointer" onclick="openEditEnrollment(${e.id})"><div style="font-weight:500;font-size:13px">${safeText(p?p.name:'')}</div><div style="font-size:12px;color:var(--red)">${safeText(e.payer)} — ${Math.abs(d)} days overdue</div></div>`;}).join('')||'<p style="font-size:13px;color:var(--gray);padding:8px 0">No overdue follow-ups</p>'}
 </div></div></div></div>`;
 }
+
 function renderIntake(){
   const payerMap={};
-  state.enrollments.filter(e=>e.status==='Effective'||e.status==='Approved').forEach(e=>{const p=state.providers.find(x=>x.id===e.providerId);if(!p)return;if(!payerMap[e.payer])payerMap[e.payer]=[];payerMap[e.payer].push({provider:p,enrollment:e});});
-  const payers=Object.keys(payerMap).sort();const allPayers=[...new Set(state.enrollments.map(e=>e.payer))].sort();
-  return`<div class="topbar"><h1>Intake Specialist — Insurance Panel Dashboard</h1></div>
+  state.enrollments
+    .filter(e=>e.status==='Effective'||e.status==='Approved')
+    .forEach(e=>{
+      const p=state.providers.find(x=>x.id===e.providerId);
+      if(!p)return;
+      if(!payerMap[e.payer])payerMap[e.payer]=[];
+      payerMap[e.payer].push({provider:p,enrollment:e});
+    });
+
+  const payers=Object.keys(payerMap).sort();
+  const totalActive=state.enrollments.filter(e=>e.status==='Effective'||e.status==='Approved').length;
+
+  return `<div class="topbar"><h1>Intake Specialist — Insurance Panel Dashboard</h1></div>
 <div class="content"><div style="background:#fffbeb;border:1px solid #fde68a;border-radius:var(--radius);padding:12px 16px;margin-bottom:16px;font-size:13px;color:#78350f"><strong>Insurance Panel Reference:</strong> Shows all providers actively contracted (Effective/Approved) per insurance panel.</div>
+${payers.length===0?`<div class="card"><div class="empty-state"><p>No active payer panels were found.</p><p style="margin-top:8px;font-size:12px">If this is unexpected, open the browser console. The page will now show Supabase load errors above if a query failed.</p><p style="margin-top:8px;font-size:12px">Current active enrollments found: ${totalActive}</p></div></div>`:''}
 <div class="grid-2" style="margin-bottom:20px">
-${payers.map(payer=>{const entries=payerMap[payer];return`<div class="intake-panel"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><span class="intake-panel-name">${payer}</span><span style="font-size:12px;font-weight:600;color:var(--green);background:#f0fdf4;padding:2px 8px;border-radius:20px">${entries.length} contracted</span></div>
+${payers.map(payer=>{const entries=payerMap[payer];return`<div class="intake-panel"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><span class="intake-panel-name">${safeText(payer)}</span><span style="font-size:12px;font-weight:600;color:var(--green);background:#f0fdf4;padding:2px 8px;border-radius:20px">${entries.length} contracted</span></div>
 ${entries.map(({provider:p,enrollment:e})=>{const isAssoc=p.type==='associate';const isSup=p.type==='supervisor';const sup=isAssoc&&p.supervisorId?state.providers.find(x=>x.id===p.supervisorId):null;const myAssocs=isSup?state.providers.filter(x=>x.supervisorId===p.id):[];const tagCls=isAssoc?'assoc-tag':isSup?'sup-tag':'provider-tag';const typeLabel=isAssoc?'Assoc':isSup?'Sup':'Ind';
-return`<div style="padding:8px 0;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:flex-start;gap:8px"><div><span class="${tagCls}" style="font-size:10px">${typeLabel}</span><strong style="font-size:13px"> ${p.name}</strong>, <span style="font-size:12px;color:var(--gray)">${p.credentials}</span>${sup?`<div style="font-size:11px;color:#7c3aed;margin-top:2px">↳ Supervised by ${sup.name}</div>`:''}${isSup&&myAssocs.length?`<div style="font-size:11px;color:#7c3aed;margin-top:2px">Associates in-network: ${myAssocs.map(a=>a.name.split(' ')[0]).join(', ')}</div>`:''}</div><div style="text-align:right;font-size:11px;color:var(--gray);white-space:nowrap">${e.effective?`Eff: ${formatDate(e.effective)}`:''}${e.recredDue?`<br>Recred: ${formatDate(e.recredDue)}`:''}</div></div>`;}).join('')}</div>`;}).join('')}
+return`<div style="padding:8px 0;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:flex-start;gap:8px"><div><span class="${tagCls}" style="font-size:10px">${typeLabel}</span><strong style="font-size:13px"> ${safeText(p.name)}</strong>, <span style="font-size:12px;color:var(--gray)">${safeText(p.credentials)}</span>${sup?`<div style="font-size:11px;color:#7c3aed;margin-top:2px">↳ Supervised by ${safeText(sup.name)}</div>`:''}${isSup&&myAssocs.length?`<div style="font-size:11px;color:#7c3aed;margin-top:2px">Associates in-network: ${myAssocs.map(a=>safeText(a.name).split(' ')[0]).join(', ')}</div>`:''}</div><div style="text-align:right;font-size:11px;color:var(--gray);white-space:nowrap">${e.effective?`Eff: ${formatDate(e.effective)}`:''}${e.recredDue?`<br>Recred: ${formatDate(e.recredDue)}`:''}</div></div>`;}).join('')}</div>`;}).join('')}
 </div></div>`;
 }
+
 function renderSupervisor(){
-  const supervisors=state.providers.filter(p=>p.type==='supervisor');const associates=state.providers.filter(p=>p.type==='associate');
-  return`<div class="topbar"><h1>Supervisor / Associate Billing View</h1></div>
+  const supervisors=state.providers.filter(p=>p.type==='supervisor');
+  const associates=state.providers.filter(p=>p.type==='associate');
+  return `<div class="topbar"><h1>Supervisor / Associate Billing View</h1></div>
 <div class="content"><div style="background:#ede9fe;border:1px solid #c4b5fd;border-radius:var(--radius);padding:12px 16px;margin-bottom:16px;font-size:13px;color:#4c1d95">Associates bill under their supervisor's NPI and are counted as in-network for any payers where the supervisor is contracted.</div>
 ${supervisors.map(sup=>{const supEnls=state.enrollments.filter(e=>e.providerId===sup.id&&(e.status==='Effective'||e.status==='Approved'));const supAssocs=associates.filter(a=>a.supervisorId===sup.id);
-return`<div class="card" style="margin-bottom:16px"><div class="card-header"><div style="display:flex;align-items:center;gap:12px"><div class="provider-avatar" style="background:${avatarColor(sup.id)}20;color:${avatarColor(sup.id)}">${initials(sup.name)}</div><div><div style="font-size:15px;font-weight:700;color:var(--c1)">${sup.name}, ${sup.credentials}</div><div style="font-size:12px;color:var(--gray)">Supervisor · NPI: ${sup.npi} · ${supEnls.length} active panels</div></div></div><button class="btn btn-outline btn-sm" onclick="viewProvider(${sup.id})">View Full Profile</button></div>
-<div class="section-title">Active Insurance Panels (${supEnls.length})</div><div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px">${supEnls.length?supEnls.map(e=>`<span class="sup-tag">${e.payer}</span>`).join(''):'<span style="font-size:13px;color:var(--gray)">No active panels</span>'}</div>
-<div class="section-title">Associates Billing Under ${sup.name.split(' ')[0]} (${supAssocs.length})</div>
+return `<div class="card" style="margin-bottom:16px"><div class="card-header"><div style="display:flex;align-items:center;gap:12px"><div class="provider-avatar" style="background:${avatarColor(sup.id)}20;color:${avatarColor(sup.id)}">${initials(sup.name)}</div><div><div style="font-size:15px;font-weight:700;color:var(--c1)">${safeText(sup.name)}, ${safeText(sup.credentials)}</div><div style="font-size:12px;color:var(--gray)">Supervisor · NPI: ${safeText(sup.npi)} · ${supEnls.length} active panels</div></div></div><button class="btn btn-outline btn-sm" onclick="viewProvider(${sup.id})">View Full Profile</button></div>
+<div class="section-title">Active Insurance Panels (${supEnls.length})</div><div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px">${supEnls.length?supEnls.map(e=>`<span class="sup-tag">${safeText(e.payer)}</span>`).join(''):'<span style="font-size:13px;color:var(--gray)">No active panels</span>'}</div>
+<div class="section-title">Associates Billing Under ${safeText(sup.name).split(' ')[0]} (${supAssocs.length})</div>
 ${supAssocs.length===0?'<p style="font-size:13px;color:var(--gray)">No associates assigned.</p>':supAssocs.map(a=>{const inNetPayers=supEnls.map(e=>e.payer);const aEnls=state.enrollments.filter(e=>e.providerId===a.id&&e.status!=='Not Started');
-return`<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;margin-bottom:8px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><div style="display:flex;align-items:center;gap:8px"><div class="provider-avatar" style="width:30px;height:30px;font-size:11px;background:${avatarColor(a.id)}20;color:${avatarColor(a.id)}">${initials(a.name)}</div><div><strong style="cursor:pointer;color:var(--c2)" onclick="viewProvider(${a.id})">${a.name}, ${a.credentials}</strong><div style="font-size:11px;color:var(--gray)">NPI: ${a.npi}</div></div></div><button class="btn btn-outline btn-sm" onclick="viewProvider(${a.id})">Profile</button></div>
-<div style="font-size:12px;color:var(--gray);margin-bottom:4px">In-network via supervisor's panels:</div><div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px">${inNetPayers.map(payer=>`<span class="assoc-tag">${payer}</span>`).join('') || '<span style="font-size:12px;color:var(--gray)">None</span>'}</div>
-${aEnls.length?`<div style="font-size:12px;color:var(--gray);margin-bottom:4px">Own direct enrollments:</div><div style="display:flex;flex-wrap:wrap;gap:4px">${aEnls.map(e=>`<span class="tag" style="background:#f1f5f9;color:#334155">${e.payer} <span class="status-badge ${sClass(e.status)}" style="font-size:10px;margin-left:2px">${e.status}</span></span>`).join('')}</div>`:''}</div>`;}).join('')}</div>`;}).join('')}
+return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;margin-bottom:8px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><div style="display:flex;align-items:center;gap:8px"><div class="provider-avatar" style="width:30px;height:30px;font-size:11px;background:${avatarColor(a.id)}20;color:${avatarColor(a.id)}">${initials(a.name)}</div><div><strong style="cursor:pointer;color:var(--c2)" onclick="viewProvider(${a.id})">${safeText(a.name)}, ${safeText(a.credentials)}</strong><div style="font-size:11px;color:var(--gray)">NPI: ${safeText(a.npi)}</div></div></div><button class="btn btn-outline btn-sm" onclick="viewProvider(${a.id})">Profile</button></div>
+<div style="font-size:12px;color:var(--gray);margin-bottom:4px">In-network via supervisor's panels:</div><div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px">${inNetPayers.map(payer=>`<span class="assoc-tag">${safeText(payer)}</span>`).join('') || '<span style="font-size:12px;color:var(--gray)">None</span>'}</div>
+${aEnls.length?`<div style="font-size:12px;color:var(--gray);margin-bottom:4px">Own direct enrollments:</div><div style="display:flex;flex-wrap:wrap;gap:4px">${aEnls.map(e=>`<span class="tag" style="background:#f1f5f9;color:#334155">${safeText(e.payer)} <span class="status-badge ${sClass(e.status)}" style="font-size:10px;margin-left:2px">${safeText(e.status)}</span></span>`).join('')}</div>`:''}</div>`;}).join('')}</div>`;}).join('')}
 ${supervisors.length===0?`<div class="card"><div class="empty-state"><p>No supervisors added yet.</p></div></div>`:''}</div>`;
 }
 
-// ── NEW: Users & Access view ──────────────────────────────────
 function renderUsers(){
-  if(!canAdmin())return`<div class="topbar"><h1>Access Denied</h1></div><div class="content"><div class="card"><div class="empty-state"><p>Only admins can manage users.</p></div></div></div>`;
-  return`<div class="topbar"><h1>Users & Access</h1><div class="topbar-actions"><button class="btn btn-primary" onclick="openInviteModal()">+ Invite User</button></div></div>
+  if(!canAdmin())return `<div class="topbar"><h1>Access Denied</h1></div><div class="content"><div class="card"><div class="empty-state"><p>Only admins can manage users.</p></div></div></div>`;
+  return `<div class="topbar"><h1>Users & Access</h1><div class="topbar-actions"><button class="btn btn-primary" onclick="openInviteModal()">+ Invite User</button></div></div>
 <div class="content" id="users-content"><div style="text-align:center;padding:30px;color:var(--gray)">Loading users…</div></div>`;
-  // Loads async
 }
 
 async function loadUsersContent(){
-  const {data:roles} = await sb.from('user_roles').select('*').order('created_at');
-  const {data:invites} = await sb.from('invitations').select('*').order('created_at',{ascending:false});
+  const {data:roles, error:rolesErr} = await sb.from('user_roles').select('*').order('created_at');
+  const {data:invites, error:invErr} = await sb.from('invitations').select('*').order('created_at',{ascending:false});
   const content = document.getElementById('users-content');
   if(!content)return;
+
+  if (rolesErr || invErr) {
+    content.innerHTML = `<div class="error-box">${safeText(rolesErr?.message || invErr?.message || 'Failed to load users')}</div>`;
+    return;
+  }
+
   content.innerHTML = `
 <div class="card" style="margin-bottom:16px">
   <div class="card-header"><span class="card-title">Active Users (${(roles||[]).length})</span></div>
   ${(roles||[]).map(r=>`<div class="invite-row">
-    <div><div style="font-weight:500;font-size:13px">${r.email}</div><div style="font-size:11px;color:var(--gray)">Joined ${new Date(r.created_at).toLocaleDateString()}</div></div>
+    <div><div style="font-weight:500;font-size:13px">${safeText(r.email)}</div><div style="font-size:11px;color:var(--gray)">Joined ${new Date(r.created_at).toLocaleDateString()}</div></div>
     <div style="display:flex;align-items:center;gap:8px">
-      <span class="role-pill rp-${r.role}">${r.role}</span>
+      <span class="role-pill rp-${r.role}">${safeText(r.role)}</span>
       ${r.user_id!==state.currentUser.id?`<select class="select-input" style="font-size:12px" onchange="changeRole('${r.user_id}',this.value)">
         <option value="admin" ${r.role==='admin'?'selected':''}>Admin</option>
         <option value="editor" ${r.role==='editor'?'selected':''}>Editor</option>
         <option value="viewer" ${r.role==='viewer'?'selected':''}>Viewer</option>
       </select>
-      <button class="btn btn-danger btn-sm" onclick="removeUser('${r.user_id}','${r.email}')">Remove</button>`:'<span style="font-size:11px;color:var(--gray)">(you)</span>'}
+      <button class="btn btn-danger btn-sm" onclick="removeUser('${r.user_id}','${safeText(r.email)}')">Remove</button>`:'<span style="font-size:11px;color:var(--gray)">(you)</span>'}
     </div>
   </div>`).join('')}
 </div>
@@ -643,33 +866,29 @@ async function loadUsersContent(){
   <div class="card-header"><span class="card-title">Pending Invitations</span></div>
   ${(invites||[]).filter(i=>!i.accepted).length===0?'<p style="font-size:13px;color:var(--gray);padding:8px 0">No pending invitations</p>':''}
   ${(invites||[]).filter(i=>!i.accepted).map(inv=>`<div class="invite-row">
-    <div><div style="font-weight:500;font-size:13px">${inv.email}</div><div style="font-size:11px;color:var(--gray)">Invited ${new Date(inv.created_at).toLocaleDateString()} · Expires ${new Date(inv.expires_at).toLocaleDateString()}</div></div>
-    <div style="display:flex;align-items:center;gap:8px"><span class="role-pill rp-${inv.role}">${inv.role}</span><button class="btn btn-danger btn-sm" onclick="revokeInvite('${inv.id}')">Revoke</button></div>
+    <div><div style="font-weight:500;font-size:13px">${safeText(inv.email)}</div><div style="font-size:11px;color:var(--gray)">Invited ${new Date(inv.created_at).toLocaleDateString()} · Expires ${new Date(inv.expires_at).toLocaleDateString()}</div></div>
+    <div style="display:flex;align-items:center;gap:8px"><span class="role-pill rp-${inv.role}">${safeText(inv.role)}</span><button class="btn btn-danger btn-sm" onclick="revokeInvite('${inv.id}')">Revoke</button></div>
   </div>`).join('')}
 </div>`;
 }
 
-// Watch for when users view renders
-const _origRender = render;
-function render(){
-  _origRender();
-  if(state.currentView==='users') setTimeout(loadUsersContent, 50);
-}
-
 async function changeRole(userId, newRole){
   const {error}=await sb.from('user_roles').update({role:newRole}).eq('user_id',userId);
-  if(error)showToast('Failed to update role');
+  if(error)showToast('Failed to update role: ' + error.message);
   else{showToast('Role updated');loadUsersContent();}
 }
+
 async function removeUser(userId, email){
   if(!confirm(`Remove ${email} from this workspace?`))return;
   const {error}=await sb.from('user_roles').delete().eq('user_id',userId);
-  if(error)showToast('Failed to remove user');
+  if(error)showToast('Failed to remove user: ' + error.message);
   else{await audit('delete','user_roles',userId,{email});showToast('User removed');loadUsersContent();}
 }
+
 async function revokeInvite(invId){
-  await sb.from('invitations').delete().eq('id',invId);
-  showToast('Invitation revoked');loadUsersContent();
+  const { error } = await sb.from('invitations').delete().eq('id',invId);
+  if (error) showToast('Failed to revoke invitation: ' + error.message);
+  else { showToast('Invitation revoked'); loadUsersContent(); }
 }
 
 function openInviteModal(){
@@ -697,14 +916,13 @@ async function sendInvite(){
   const email = document.getElementById('inv-email').value.trim().toLowerCase();
   const role = document.getElementById('inv-role').value;
   if(!email||!email.includes('@')){showToast('Enter a valid email');return;}
-  // Record invitation in DB
+
   const {error}=await sb.from('invitations').upsert({email,role,invited_by:state.currentUser.id},{onConflict:'email'});
   if(error){showToast('Error: '+error.message);return;}
-  // Send magic link (Supabase handles email)
-  // For now we tell admin to share the URL — production: use Supabase Edge Function for custom email
+
   closeModal();
   showToast(`Invitation recorded for ${email}`);
-  // Show confirmation with instructions
+
   document.getElementById('modal-root').innerHTML=`<div class="modal-backdrop" id="modal-bd" onclick="if(event.target.id==='modal-bd')closeModal()">
   <div class="modal" style="width:460px"><div class="modal-header"><h2>Invitation Created</h2><button class="close-btn" onclick="closeModal()">×</button></div>
   <div class="modal-body">
@@ -718,18 +936,18 @@ async function sendInvite(){
   </div>
   <div class="modal-footer"><button class="btn btn-primary" onclick="closeModal()">Done</button></div>
   </div></div>`;
+
   await audit('create','invitations',email,{role});
   loadUsersContent();
 }
 
-// ── Settings ──────────────────────────────────────────────────
 function renderSettings(){
   const s=state.settings;
   const ro=!canAdmin();
-  return`<div class="topbar"><h1>Settings</h1>${ro?`<div style="padding:6px 14px;background:#fffbeb;border:1px solid #fde68a;border-radius:6px;font-size:12px;color:#78350f">Admins only can change settings</div>`:''}</div>
+  return `<div class="topbar"><h1>Settings</h1>${ro?`<div style="padding:6px 14px;background:#fffbeb;border:1px solid #fde68a;border-radius:6px;font-size:12px;color:#78350f">Admins only can change settings</div>`:''}</div>
 <div class="content"><div class="grid-2">
 <div><div class="card" style="margin-bottom:16px"><div class="card-header"><span class="card-title">Practice Information</span></div>
-${[['practiceName','Practice Name'],['taxId','Tax ID / EIN'],['groupNpi','Group NPI'],['address','Address']].map(([k,l])=>`<div class="form-group"><label class="form-label">${l}</label><input type="text" class="form-input" id="set-${k}" value="${s[k]||''}" ${ro?'disabled':''}></div>`).join('')}
+${[['practiceName','Practice Name'],['taxId','Tax ID / EIN'],['groupNpi','Group NPI'],['address','Address']].map(([k,l])=>`<div class="form-group"><label class="form-label">${l}</label><input type="text" class="form-input" id="set-${k}" value="${safeText(s[k]||'')}" ${ro?'disabled':''}></div>`).join('')}
 ${!ro?`<button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>`:''}
 </div></div>
 <div><div class="card"><div class="card-header"><span class="card-title">Alert Thresholds</span></div>
@@ -742,13 +960,22 @@ ${!ro?`<button class="btn btn-primary" onclick="saveSettings()">Save Settings</b
 
 async function saveSettings(){
   if(!requireAdmin())return;
-  const vals={practice_name:document.getElementById('set-practiceName').value,tax_id:document.getElementById('set-taxId').value,group_npi:document.getElementById('set-groupNpi').value,address:document.getElementById('set-address').value,alert_license:parseInt(document.getElementById('set-alertLicense').value),alert_malpractice:parseInt(document.getElementById('set-alertMalpractice').value),alert_dea:parseInt(document.getElementById('set-alertDea').value),alert_caqh:parseInt(document.getElementById('set-alertCaqh').value),alert_cpr:parseInt(document.getElementById('set-alertCpr').value)};
+  const vals={
+    practice_name:document.getElementById('set-practiceName').value,
+    tax_id:document.getElementById('set-taxId').value,
+    group_npi:document.getElementById('set-groupNpi').value,
+    address:document.getElementById('set-address').value,
+    alert_license:parseInt(document.getElementById('set-alertLicense').value),
+    alert_malpractice:parseInt(document.getElementById('set-alertMalpractice').value),
+    alert_dea:parseInt(document.getElementById('set-alertDea').value),
+    alert_caqh:parseInt(document.getElementById('set-alertCaqh').value),
+    alert_cpr:parseInt(document.getElementById('set-alertCpr').value)
+  };
   const {error}=await sb.from('settings').update(vals).eq('id',1);
   if(error)showToast('Error saving: '+error.message);
   else{state.settings=mapSettings({...vals,id:1});flashSave();showToast('Settings saved');render();}
 }
 
-// ── Provider CRUD ─────────────────────────────────────────────
 function openAddProvider(){if(!requireEdit())return;showProviderModal(null);}
 function openEditProvider(id){if(!requireEdit())return;showProviderModal(state.providers.find(p=>p.id===id));}
 function openAddEnrollment(pid){if(!requireEdit())return;showEnrollmentModal(null,pid);}
@@ -756,21 +983,22 @@ function openEditEnrollment(id){if(!requireEdit())return;showEnrollmentModal(sta
 function closeModal(){document.getElementById('modal-root').innerHTML='';}
 
 function showProviderModal(p){
-  const isEdit=p&&p.id;const v=(f,def='')=>p?(p[f]!=null?p[f]:def):def;
+  const isEdit=p&&p.id;
+  const v=(f,def='')=>p?(p[f]!=null?p[f]:def):def;
   const supervisors=state.providers.filter(x=>x.type==='supervisor');
   const html=`<div class="modal-backdrop" id="modal-bd" onclick="if(event.target.id==='modal-bd')closeModal()">
-  <div class="modal"><div class="modal-header"><h2>${isEdit?'Edit Provider: '+p.name:'Add New Provider'}</h2><button class="close-btn" onclick="closeModal()">×</button></div>
+  <div class="modal"><div class="modal-header"><h2>${isEdit?'Edit Provider: '+safeText(p.name):'Add New Provider'}</h2><button class="close-btn" onclick="closeModal()">×</button></div>
   <div class="modal-body">
     <div class="section-title" style="margin-top:0">Basic Information</div>
-    <div class="form-row"><div class="form-group"><label class="form-label">Full Name *</label><input class="form-input" id="f-name" value="${v('name')}" placeholder="First Last"></div><div class="form-group"><label class="form-label">Credentials *</label><input class="form-input" id="f-cred" value="${v('credentials')}" placeholder="LPC, LCSW, etc."></div></div>
-    <div class="form-row-3"><div class="form-group"><label class="form-label">NPI Number</label><input class="form-input" id="f-npi" value="${v('npi')}" placeholder="10 digits"></div><div class="form-group"><label class="form-label">License Number</label><input class="form-input" id="f-lic" value="${v('license')}"></div><div class="form-group"><label class="form-label">License Expiration</label><input type="date" class="form-input" id="f-licexp" value="${v('licenseExp')}"></div></div>
-    <div class="form-row"><div class="form-group"><label class="form-label">CAQH ID</label><input class="form-input" id="f-caqh" value="${v('caqhId')}"></div><div class="form-group"><label class="form-label">CAQH Attestation Due</label><input type="date" class="form-input" id="f-caqhdue" value="${v('caqhDue')}"></div></div>
-    <div class="form-row-3"><div class="form-group"><label class="form-label">Medicaid / DMAP ID</label><input class="form-input" id="f-med" value="${v('medicaidId')}"></div><div class="form-group"><label class="form-label">Malpractice Expiration</label><input type="date" class="form-input" id="f-malp" value="${v('malpracticeExp')}"></div><div class="form-group"><label class="form-label">DEA Expiration</label><input type="date" class="form-input" id="f-dea" value="${v('deaExp')}"></div></div>
-    <div class="form-row"><div class="form-group"><label class="form-label">CPR / Training Expiration</label><input type="date" class="form-input" id="f-cpr" value="${v('cprExp')}"></div><div class="form-group"><label class="form-label">Start Date</label><input type="date" class="form-input" id="f-start" value="${v('startDate')}"></div></div>
+    <div class="form-row"><div class="form-group"><label class="form-label">Full Name *</label><input class="form-input" id="f-name" value="${safeText(v('name'))}" placeholder="First Last"></div><div class="form-group"><label class="form-label">Credentials *</label><input class="form-input" id="f-cred" value="${safeText(v('credentials'))}" placeholder="LPC, LCSW, etc."></div></div>
+    <div class="form-row-3"><div class="form-group"><label class="form-label">NPI Number</label><input class="form-input" id="f-npi" value="${safeText(v('npi'))}" placeholder="10 digits"></div><div class="form-group"><label class="form-label">License Number</label><input class="form-input" id="f-lic" value="${safeText(v('license'))}"></div><div class="form-group"><label class="form-label">License Expiration</label><input type="date" class="form-input" id="f-licexp" value="${safeText(v('licenseExp'))}"></div></div>
+    <div class="form-row"><div class="form-group"><label class="form-label">CAQH ID</label><input class="form-input" id="f-caqh" value="${safeText(v('caqhId'))}"></div><div class="form-group"><label class="form-label">CAQH Attestation Due</label><input type="date" class="form-input" id="f-caqhdue" value="${safeText(v('caqhDue'))}"></div></div>
+    <div class="form-row-3"><div class="form-group"><label class="form-label">Medicaid / DMAP ID</label><input class="form-input" id="f-med" value="${safeText(v('medicaidId'))}"></div><div class="form-group"><label class="form-label">Malpractice Expiration</label><input type="date" class="form-input" id="f-malp" value="${safeText(v('malpracticeExp'))}"></div><div class="form-group"><label class="form-label">DEA Expiration</label><input type="date" class="form-input" id="f-dea" value="${safeText(v('deaExp'))}"></div></div>
+    <div class="form-row"><div class="form-group"><label class="form-label">CPR / Training Expiration</label><input type="date" class="form-input" id="f-cpr" value="${safeText(v('cprExp'))}"></div><div class="form-group"><label class="form-label">Start Date</label><input type="date" class="form-input" id="f-start" value="${safeText(v('startDate'))}"></div></div>
     <div class="section-title">Role & Status</div>
     <div class="form-row"><div class="form-group"><label class="form-label">Provider Type</label><select class="form-input" id="f-type" onchange="document.getElementById('sup-row').style.display=this.value==='associate'?'':'none'"><option value="independent" ${v('type')==='independent'?'selected':''}>Independent</option><option value="supervisor" ${v('type')==='supervisor'?'selected':''}>Supervisor</option><option value="associate" ${v('type')==='associate'?'selected':''}>Associate</option></select></div><div class="form-group"><label class="form-label">Status</label><select class="form-input" id="f-status"><option ${v('status','Active')==='Active'?'selected':''}>Active</option><option ${v('status')==='Inactive'?'selected':''}>Inactive</option><option ${v('status')==='On Hold'?'selected':''}>On Hold</option></select></div></div>
-    <div id="sup-row" style="display:${v('type')==='associate'?'':'none'}"><div class="form-group"><label class="form-label">Supervising Provider</label><select class="form-input" id="f-supid"><option value="">— Select Supervisor —</option>${supervisors.map(s=>`<option value="${s.id}" ${v('supervisorId')==s.id?'selected':''}>${s.name}, ${s.credentials}</option>`).join('')}</select></div></div>
-    <div class="form-group"><label class="form-label">Notes</label><textarea class="form-input" id="f-notes" rows="3">${v('notes')}</textarea></div>
+    <div id="sup-row" style="display:${v('type')==='associate'?'':'none'}"><div class="form-group"><label class="form-label">Supervising Provider</label><select class="form-input" id="f-supid"><option value="">— Select Supervisor —</option>${supervisors.map(s=>`<option value="${s.id}" ${v('supervisorId')==s.id?'selected':''}>${safeText(s.name)}, ${safeText(s.credentials)}</option>`).join('')}</select></div></div>
+    <div class="form-group"><label class="form-label">Notes</label><textarea class="form-input" id="f-notes" rows="3">${safeText(v('notes'))}</textarea></div>
   </div>
   <div class="modal-footer">
     ${isEdit&&canAdmin()?`<button class="btn btn-danger btn-sm" onclick="deleteProvider(${p.id})">Delete Provider</button><div style="flex:1"></div>`:''}
@@ -802,18 +1030,19 @@ async function deleteProvider(id){
 }
 
 function showEnrollmentModal(e,defaultPid){
-  const isEdit=e&&e.id;const v=(f,def='')=>e?(e[f]!=null?e[f]:def):def;
+  const isEdit=e&&e.id;
+  const v=(f,def='')=>e?(e[f]!=null?e[f]:def):def;
   const pid=defaultPid||(e?e.providerId:null);
   const html=`<div class="modal-backdrop" id="modal-bd" onclick="if(event.target.id==='modal-bd')closeModal()">
-  <div class="modal"><div class="modal-header"><h2>${isEdit?'Edit Enrollment: '+e.payer:'Add Payer Enrollment'}</h2><button class="close-btn" onclick="closeModal()">×</button></div>
+  <div class="modal"><div class="modal-header"><h2>${isEdit?'Edit Enrollment: '+safeText(e.payer):'Add Payer Enrollment'}</h2><button class="close-btn" onclick="closeModal()">×</button></div>
   <div class="modal-body">
-    <div class="form-row"><div class="form-group"><label class="form-label">Provider *</label><select class="form-input" id="e-pid"><option value="">Select provider...</option>${state.providers.map(p=>`<option value="${p.id}" ${(pid==p.id)?'selected':''}>${p.name}, ${p.credentials}</option>`).join('')}</select></div><div class="form-group"><label class="form-label">Payer Name *</label><input class="form-input" id="e-payer" value="${v('payer')}" placeholder="e.g. Aetna, BCBS Oregon..."></div></div>
+    <div class="form-row"><div class="form-group"><label class="form-label">Provider *</label><select class="form-input" id="e-pid"><option value="">Select provider...</option>${state.providers.map(p=>`<option value="${p.id}" ${(pid==p.id)?'selected':''}>${safeText(p.name)}, ${safeText(p.credentials)}</option>`).join('')}</select></div><div class="form-group"><label class="form-label">Payer Name *</label><input class="form-input" id="e-payer" value="${safeText(v('payer'))}" placeholder="e.g. Aetna, BCBS Oregon..."></div></div>
     <div class="form-group"><label class="form-label">Current Status</label><select class="form-input" id="e-status">${STATUS_STAGES.map(s=>`<option ${v('status','Not Started')===s?'selected':''}>${s}</option>`).join('')}</select></div>
-    <div class="form-row"><div class="form-group"><label class="form-label">Application Submitted</label><input type="date" class="form-input" id="e-sub" value="${v('submitted')}"></div><div class="form-group"><label class="form-label">Effective Date</label><input type="date" class="form-input" id="e-eff" value="${v('effective')}"></div></div>
-    <div class="form-row"><div class="form-group"><label class="form-label">Recredential Due Date</label><input type="date" class="form-input" id="e-recred" value="${v('recredDue')}"></div><div class="form-group"><label class="form-label">Contract Status</label><input class="form-input" id="e-contract" value="${v('contract','Pending')}" placeholder="Active, Pending, etc."></div></div>
+    <div class="form-row"><div class="form-group"><label class="form-label">Application Submitted</label><input type="date" class="form-input" id="e-sub" value="${safeText(v('submitted'))}"></div><div class="form-group"><label class="form-label">Effective Date</label><input type="date" class="form-input" id="e-eff" value="${safeText(v('effective'))}"></div></div>
+    <div class="form-row"><div class="form-group"><label class="form-label">Recredential Due Date</label><input type="date" class="form-input" id="e-recred" value="${safeText(v('recredDue'))}"></div><div class="form-group"><label class="form-label">Contract Status</label><input class="form-input" id="e-contract" value="${safeText(v('contract','Pending'))}" placeholder="Active, Pending, etc."></div></div>
     <div class="form-row"><div class="form-group"><label class="form-label">EFT Status</label><select class="form-input" id="e-eft"><option ${v('eft','Not Started')==='Active'?'selected':''}>Active</option><option ${v('eft','Not Started')==='Pending'?'selected':''}>Pending</option><option ${v('eft','Not Started')==='Not Started'?'selected':''}>Not Started</option></select></div><div class="form-group"><label class="form-label">ERA Status</label><select class="form-input" id="e-era"><option ${v('era','Not Started')==='Active'?'selected':''}>Active</option><option ${v('era','Not Started')==='Pending'?'selected':''}>Pending</option><option ${v('era','Not Started')==='Not Started'?'selected':''}>Not Started</option></select></div></div>
-    <div class="form-row"><div class="form-group"><label class="form-label">Last Follow-up Date</label><input type="date" class="form-input" id="e-last" value="${v('lastFollowUp')}"></div><div class="form-group"><label class="form-label">Next Follow-up Date</label><input type="date" class="form-input" id="e-next" value="${v('nextFollowUp')}"></div></div>
-    <div class="form-group"><label class="form-label">Notes</label><textarea class="form-input" id="e-notes" rows="3">${v('notes')}</textarea></div>
+    <div class="form-row"><div class="form-group"><label class="form-label">Last Follow-up Date</label><input type="date" class="form-input" id="e-last" value="${safeText(v('lastFollowUp'))}"></div><div class="form-group"><label class="form-label">Next Follow-up Date</label><input type="date" class="form-input" id="e-next" value="${safeText(v('nextFollowUp'))}"></div></div>
+    <div class="form-group"><label class="form-label">Notes</label><textarea class="form-input" id="e-notes" rows="3">${safeText(v('notes'))}</textarea></div>
   </div>
   <div class="modal-footer">
     ${isEdit&&canAdmin()?`<button class="btn btn-danger btn-sm" onclick="deleteEnrollment(${e.id})">Delete</button><div style="flex:1"></div>`:''}
@@ -825,7 +1054,8 @@ function showEnrollmentModal(e,defaultPid){
 
 async function saveEnrollment(id){
   if(!requireEdit())return;
-  const payerVal=document.getElementById('e-payer').value.trim();const provVal=document.getElementById('e-pid').value;
+  const payerVal=document.getElementById('e-payer').value.trim();
+  const provVal=document.getElementById('e-pid').value;
   if(!payerVal||!provVal){showToast('Provider and payer name are required');return;}
   const obj={provider_id:parseInt(provVal),payer:payerVal,status:document.getElementById('e-status').value,submitted:document.getElementById('e-sub').value||null,effective:document.getElementById('e-eff').value||null,recred_due:document.getElementById('e-recred').value||null,contract:document.getElementById('e-contract').value,eft:document.getElementById('e-eft').value,era:document.getElementById('e-era').value,last_follow_up:document.getElementById('e-last').value||null,next_follow_up:document.getElementById('e-next').value||null,notes:document.getElementById('e-notes').value.trim(),updated_by:state.currentUser.id};
   let error;
@@ -843,7 +1073,6 @@ async function deleteEnrollment(id){
   else{await audit('delete','enrollments',id,{});closeModal();render();showToast('Enrollment deleted');}
 }
 
-// ── Init ──────────────────────────────────────────────────────
 initAuth();
 </script>
 </body>
